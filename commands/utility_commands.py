@@ -8,7 +8,7 @@ class UtilityCommands(commands.Cog):
 
     @commands.command()
     async def ping(self, ctx):
-        await ctx.send('Pong!')
+        await ctx.send("pong!")
 
     @commands.command()
     async def coinflip(self, ctx):
