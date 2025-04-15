@@ -1,1 +1,26 @@
-﻿
+﻿*.json
+
+# Archivos y carpetas de Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+*.venv
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Configuración de IDEs
+.idea/
+.vscode/
+*.iml
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivos de entorno
+.env
