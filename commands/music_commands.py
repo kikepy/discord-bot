@@ -19,12 +19,35 @@ ffmpeg_opts = {
 
 ytdl = yt_dlp.YoutubeDL(ydl_format_opts)
 
+class SongHistory:
+    def __init__(self):
+        self.history = []
+        self.current_index = -1
+
+    def add_song(self, song):
+        self.history.append(song)
+        self.current_index = len(self.history) - 1
+
+    def get_previous_song(self):
+        if self.current_index > 0:
+            self.current_index -= 1
+            return self.history[self.current_index]
+        return None
+
+    def get_next_song(self):
+        if self.current_index < len(self.history) - 1:
+            self.current_index += 1
+            return self.history[self.current_index]
+        return None
+    def is_empty(self):
+        return len(self.history) == 0
+
 class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.voice_client = None
         self.song_queue = []
-        self.song_history = []
+        self.song_history = SongHistory()
         self.is_playing = False
 
     @commands.command()
@@ -75,6 +98,9 @@ class MusicCommands(commands.Cog):
             info = search_result['entries'][0]
             song = {"title": info['title'], "url": info['url']}
 
+            #Add the song to the history
+            self.song_history.add_song(song)
+
             # Check if is there a song playing
             if self.is_playing:
                 self.song_queue.append(song)
@@ -97,16 +123,19 @@ class MusicCommands(commands.Cog):
             await ctx.send("The bot is not connected to a voice channel.")
             return
 
-        if not self.song_queue:
-            await ctx.send("No more songs in the queue.")
-            self.is_playing = False
-            return
-
         if ctx.voice_client.is_playing():
             await ctx.voice_client.stop()
 
         # Get the next song from the queue
-        next_song = self.song_queue.pop(0)
+        next_song = self.song_history.get_next_song()
+
+        if not next_song:
+            if not self.song_queue:
+                await ctx.send("No more songs in the queue.")
+                self.is_playing = False
+                return
+            next_song = self.song_queue.pop(0)
+
         try:
             self.is_playing = True
             ctx.voice_client.play(
@@ -127,23 +156,26 @@ class MusicCommands(commands.Cog):
             await ctx.send("The bot is not connected to a voice channel.")
             return
 
-        if not self.song_history:
+        if self.song_history.is_empty():
+            await ctx.send("No previous songs in history.")
+            return
+
+        # Get the previous song from the history
+        previous_song = self.song_history.get_previous_song()
+        if previous_song is None:
             await ctx.send("No previous songs in history.")
             return
 
         if ctx.voice_client.is_playing():
             ctx.voice_client.stop()
 
-        # Get the last song from the history
-        previous_song = self.song_history.pop()
-        self.song_queue.insert(0, previous_song)
 
         try:
             self.is_playing = True
             ctx.voice_client.play(
                 discord.FFmpegPCMAudio(previous_song['url'], **ffmpeg_opts),
                 after=lambda e: asyncio.run_coroutine_threadsafe(self._after_song(ctx), self.bot.loop).result()
-                )
+            )
             await ctx.send(f"Now playing: {previous_song['title']}")
         except Exception as e:
            self.is_playing = False
@@ -152,10 +184,13 @@ class MusicCommands(commands.Cog):
     # Auxiliar function to handle the queue
     async def _after_song(self, ctx):
         if self.is_playing and self.song_queue:
-            current_song = self.song_queue[0]
-            self.song_history.append(current_song)
+            current_song = self.song_queue.pop(0)
+            self.song_history.add_song(current_song)
 
         if self.song_queue:
+            await asyncio.sleep(1)
+            await self.next(ctx)
+        elif self.song_history.get_next_song():
             await asyncio.sleep(1)
             await self.next(ctx)
         else:
