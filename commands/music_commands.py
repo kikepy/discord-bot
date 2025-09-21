@@ -1,7 +1,11 @@
 ﻿import asyncio
+import requests
 import discord
+import random
+
 from discord.ext import commands
 import yt_dlp
+from commands.song_history import SongHistory
 
 #Configurar yt-dlp
 ydl_format_opts = {
@@ -19,29 +23,6 @@ ffmpeg_opts = {
 
 ytdl = yt_dlp.YoutubeDL(ydl_format_opts)
 
-class SongHistory:
-    def __init__(self):
-        self.history = []
-        self.current_index = -1
-
-    def add_song(self, song):
-        self.history.append(song)
-        self.current_index = len(self.history) - 1
-
-    def get_previous_song(self):
-        if self.current_index > 0:
-            self.current_index -= 1
-            return self.history[self.current_index]
-        return None
-
-    def get_next_song(self):
-        if self.current_index < len(self.history) - 1:
-            self.current_index += 1
-            return self.history[self.current_index]
-        return None
-    def is_empty(self):
-        return len(self.history) == 0
-
 class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -49,6 +30,7 @@ class MusicCommands(commands.Cog):
         self.song_queue = []
         self.song_history = SongHistory()
         self.is_playing = False
+        self._manual_skip = False
 
     @commands.command()
     async def join(self, ctx):
@@ -89,7 +71,7 @@ class MusicCommands(commands.Cog):
         try:
             await ctx.send(f"Searching... {search}")
             # Use ytsearch to search for the song
-            search_result = ytdl.extract_info(f"ytsearch:{search}", download=False)
+            search_result = await self.get_youtube_info(search)
             if not search_result or 'entries' not in search_result or len(search_result['entries']) == 0:
                 await ctx.send("No results found.")
                 return
@@ -118,23 +100,38 @@ class MusicCommands(commands.Cog):
     #Play next song in the queue
     @commands.command()
     async def next(self, ctx):
+        print(f"was manual: {self._manual_skip}")
+        print(f"is playing: {self.is_playing}")
+        print(f"index is {self.song_history.current_index}")
         """Skip the current song."""
         if not ctx.voice_client or not ctx.voice_client.is_connected():
             await ctx.send("The bot is not connected to a voice channel.")
             return
 
+        # Set manual skip flag before stopping playback
+        self._manual_skip = True
+
         if ctx.voice_client.is_playing():
             await ctx.voice_client.stop()
 
-        # Get the next song from the queue
-        next_song = self.song_history.get_next_song()
+        # Get current index before moving to next
+        current_index = self.song_history.current_index
 
-        if not next_song:
-            if not self.song_queue:
-                await ctx.send("No more songs in the queue.")
-                self.is_playing = False
-                return
+        # Get the next song from the queue
+        if current_index < len(self.song_history.history) - 1:
+            next_song = self.song_history.get_next_song()
+        elif self.song_queue:
             next_song = self.song_queue.pop(0)
+            self.song_history.add_song(next_song)
+        elif len(self.song_history.history) > 0:
+            self.song_history.current_index = -1 #Reset to beginning
+            next_song = self.song_history.get_next_song()
+        else:
+            await ctx.send("No more songs in the queue.")
+            self.is_playing = False
+            self._manual_skip = False
+            return
+
 
         try:
             self.is_playing = True
@@ -146,29 +143,38 @@ class MusicCommands(commands.Cog):
         except Exception as e:
             await ctx.send(f"Error: {str(e)}")
             self.is_playing = False
-            await self.next(ctx)
+
+        self._manual_skip = False
 
         # Previous song on the queue
     @commands.command()
     async def previous(self, ctx):
+        print(f"was manual: {self._manual_skip}")
+        print(f"is playing: {self.is_playing}")
+        print(f"index is {self.song_history.current_index}")
+
         """Play the previous song."""
         if not ctx.voice_client or not ctx.voice_client.is_connected():
             await ctx.send("The bot is not connected to a voice channel.")
             return
 
-        if self.song_history.is_empty():
-            await ctx.send("No previous songs in history.")
-            return
-
-        # Get the previous song from the history
-        previous_song = self.song_history.get_previous_song()
-        if previous_song is None:
-            await ctx.send("No previous songs in history.")
-            return
+        # Set manual skip flag before stopping playback
+        self._manual_skip = True
 
         if ctx.voice_client.is_playing():
             ctx.voice_client.stop()
 
+        # Check if we have previous songs
+        if self.song_history.current_index <= 0 or len(self.song_history.history) <= 1:
+            await ctx.send("No previous songs in history.")
+            self._manual_skip = False
+            return
+
+        # Set the index to two positions back so that get_previous_song() will move to the correct position
+        self.song_history.current_index -= 1
+
+        #Going 2 song previous so we can get the previous song
+        previous_song = self.song_history.get_previous_song()
 
         try:
             self.is_playing = True
@@ -178,21 +184,44 @@ class MusicCommands(commands.Cog):
             )
             await ctx.send(f"Now playing: {previous_song['title']}")
         except Exception as e:
-           self.is_playing = False
-           await ctx.send(f"Error playing song: {str(e)}")
+            self.is_playing = False
+            await ctx.send(f"Error playing song: {str(e)}")
+
+        # Reset manual skip flag
+        self._manual_skip = False
+
+    @commands.command()
+    async def loop(self, ctx):
+        """Toggle loop mode for the current song."""
+        if not hasattr(self, 'loop_mode'):
+            self.loop_mode = False
+
+        self.loop_mode = not self.loop_mode
+        await ctx.send(f"Loop mode {'enabled' if self.loop_mode else 'disabled'}")
 
     # Auxiliar function to handle the queue
     async def _after_song(self, ctx):
-        if self.is_playing and self.song_queue:
-            current_song = self.song_queue.pop(0)
-            self.song_history.add_song(current_song)
+        if self._manual_skip:
+            return
+
+        if self.loop_mode and self.song_history.get_current_song():
+            # Replay the current song
+            current_song = self.song_history.get_current_song()
+            ctx.voice_client.play(
+                discord.FFmpegPCMAudio(current_song['url'], **ffmpeg_opts),
+                after=lambda e: asyncio.run_coroutine_threadsafe(self._after_song(ctx), self.bot.loop).result()
+            )
+            return
 
         if self.song_queue:
-            await asyncio.sleep(1)
-            await self.next(ctx)
-        elif self.song_history.get_next_song():
-            await asyncio.sleep(1)
-            await self.next(ctx)
+            next_song = self.song_queue.pop(0)
+            self.song_history.add_song(next_song)
+            self.is_playing = True
+            ctx.voice_client.play(
+                discord.FFmpegPCMAudio(next_song['url'], **ffmpeg_opts),
+                after=lambda e: asyncio.run_coroutine_threadsafe(self._after_song(ctx), self.bot.loop).result()
+            )
+            await ctx.send(f"Now playing: {next_song['title']}")
         else:
             self.is_playing = False
             await ctx.send("No more songs in the queue.")
@@ -226,3 +255,82 @@ class MusicCommands(commands.Cog):
             await ctx.send("Disconnected from the voice channel.")
         else:
             await ctx.send("I am not in a voice channel.")
+
+    async def get_youtube_info(self, search, max_retries=5):
+        """Fetch YouTube info with exponential backoff retry logic."""
+        retries = 0
+        while retries < max_retries:
+            try:
+                # Use ytsearch to search for the song
+                search_result = ytdl.extract_info(f"ytsearch:{search}", download=False)
+                return search_result
+            except Exception as e:
+                if "429" in str(e):  # Too Many Requests
+                    wait_time = (2 ** retries) + random.random()  # Exponential backoff
+                    print(f"Rate limited, waiting {wait_time:.2f} seconds...")
+                    await asyncio.sleep(wait_time)
+                    retries += 1
+                else:
+                    raise  # Re-raise if it's not a rate limit error
+
+        raise Exception("Maximum retries exceeded for YouTube request")
+
+    @commands.command()
+    async def volume(self, ctx, volume: int):
+        if not ctx.voice_client or not ctx.voice_client.is_playing():
+            return await ctx.send("No song is currently playing.")
+        if 0 > volume > 100:
+            return await ctx.send("Volume must be between 0 and 100.")
+        ctx.voice_client.source.volume = volume / 100
+        await ctx.send(f"Volume set to {volume}%")
+
+    @commands.command(name="nowplaying", aliases=["np", "current", "currentsong"])
+    async def current_song(self, ctx):
+        """Display information about the currently playing song"""
+        if not ctx.voice_client or not ctx.voice_client.is_playing():
+            return await ctx.send("The bot is not connected to a voice channel.")
+
+        current_song = self.song_history.get_current_song()
+        if not current_song:
+            return await ctx.send("No song is currently playing.")
+        else:
+            await ctx.send(f"Currently playing: {current_song['title']}")
+
+    async def cross_fade(self, ctx, next_song):
+        """Crossfade between songs."""
+        if ctx.voice_client.is_playing():
+            ctx.voice_client.source.volume = 1.0
+            for i in range(10, 0, -1):
+                ctx.voice_client.source.volume = i / 10
+                await asyncio.sleep(0.1)
+            ctx.voice_client.stop()
+
+        ctx.voice_client.play(
+            discord.FFmpegPCMAudio(next_song['url'], **ffmpeg_opts),
+            after=lambda e: asyncio.run_coroutine_threadsafe(self._after_song(ctx), self.bot.loop).result()
+        )
+        ctx.voice_client.source.volume = 0.0
+        for i in range(1, 11):
+            ctx.voice_client.source.volume = i / 10
+            await asyncio.sleep(0.1)
+
+    @commands.command()
+    async def lyrics(self, ctx, *, song_name: str = None):
+        """Fetch lyrics for the current or specified song."""
+        if not song_name:
+            current_song = self.song_history.get_current_song()
+            if not current_song:
+                return await ctx.send("No song is currently playing.")
+            song_name = current_song['title']
+
+        try:
+            # Use an API like lyrics.ovh or Genius API
+            response = requests.get(f"https://api.lyrics.ovh/v1/{song_name}")
+            data = response.json()
+            if "lyrics" in data:
+                lyrics = data["lyrics"]
+                await ctx.send(f"Lyrics for {song_name}:\n{lyrics[:2000]}")  # Discord message limit
+            else:
+                await ctx.send("Lyrics not found.")
+        except Exception as e:
+            await ctx.send(f"Error fetching lyrics: {str(e)}")
